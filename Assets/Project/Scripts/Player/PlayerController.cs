@@ -3,6 +3,9 @@ using UnityEngine.InputSystem;
 
 public class PlayerController : MonoBehaviour
 {
+    [Header("Karakter Tipi")]
+    [SerializeField] private CharacterType characterType;
+
     [Header("Ortak Karakter Verileri")]
     [SerializeField] private float maxHealth = 100f;
 
@@ -17,28 +20,27 @@ public class PlayerController : MonoBehaviour
     private Rigidbody rb;
     private Camera mainCamera;
 
-    // --- State Instances ---
-    private MeleeState meleeState;
-    private ArcherState archerState;
-    private WizardState wizardState;
+    // --- State Instance (her karakter tek bir state'e sahip) ---
+    private IPlayerState characterState;
 
     // --- Input Actions ---
     private InputAction moveAction;
     private InputAction attackAction;
-    private InputAction switchMeleeAction;
-    private InputAction switchArcherAction;
-    private InputAction switchWizardAction;
 
     private Vector2 moveInput;
+    private bool isActive;
 
     // --- Public Properties ---
-    public IPlayerState CurrentState { get; private set; }
+    public CharacterType CharacterType => characterType;
+    public IPlayerState CurrentState => characterState;
+    public bool IsActive => isActive;
     public Renderer CharacterRenderer => characterRenderer;
     public MaterialPropertyBlock PropertyBlock => propertyBlock;
     public Transform AttackPoint => attackPoint;
     public GameObject ArrowPrefab => arrowPrefab;
     public LayerMask EnemyLayer => enemyLayer;
     public float MaxHealth => maxHealth;
+    public Rigidbody Rb => rb;
 
     public float CurrentHealth
     {
@@ -55,14 +57,18 @@ public class PlayerController : MonoBehaviour
         characterRenderer = GetComponentInChildren<Renderer>();
 
         if (characterRenderer == null)
-            Debug.LogWarning("[PlayerController] Renderer bulunamadı!");
+            Debug.LogWarning($"[PlayerController:{characterType}] Renderer bulunamadı!");
         if (rb == null)
-            Debug.LogWarning("[PlayerController] Rigidbody bulunamadı!");
+            Debug.LogWarning($"[PlayerController:{characterType}] Rigidbody bulunamadı!");
 
-        // State'leri oluştur
-        meleeState = new MeleeState();
-        archerState = new ArcherState();
-        wizardState = new WizardState();
+        // Karakter tipine göre tek bir state oluştur
+        characterState = characterType switch
+        {
+            CharacterType.Melee  => new MeleeState(),
+            CharacterType.Archer => new ArcherState(),
+            CharacterType.Wizard => new WizardState(),
+            _ => new MeleeState()
+        };
 
         // --- Input Action Tanımları ---
         moveAction = new InputAction("Move", InputActionType.Value);
@@ -76,50 +82,59 @@ public class PlayerController : MonoBehaviour
         attackAction.AddBinding("<Keyboard>/space");
         attackAction.AddBinding("<Mouse>/leftButton");
 
-        switchMeleeAction = new InputAction("SwitchMelee", InputActionType.Button, "<Keyboard>/1");
-        switchArcherAction = new InputAction("SwitchArcher", InputActionType.Button, "<Keyboard>/2");
-        switchWizardAction = new InputAction("SwitchWizard", InputActionType.Button, "<Keyboard>/3");
-
         // --- Event Bağlantıları ---
         moveAction.performed += ctx => moveInput = ctx.ReadValue<Vector2>();
         moveAction.canceled += _ => moveInput = Vector2.zero;
-        attackAction.performed += _ => CurrentState?.OnAttack(this);
-        switchMeleeAction.performed += _ => ChangeState(meleeState);
-        switchArcherAction.performed += _ => ChangeState(archerState);
-        switchWizardAction.performed += _ => ChangeState(wizardState);
-    }
-
-    private void OnEnable()
-    {
-        moveAction?.Enable();
-        attackAction?.Enable();
-        switchMeleeAction?.Enable();
-        switchArcherAction?.Enable();
-        switchWizardAction?.Enable();
-    }
-
-    private void OnDisable()
-    {
-        moveAction?.Disable();
-        attackAction?.Disable();
-        switchMeleeAction?.Disable();
-        switchArcherAction?.Disable();
-        switchWizardAction?.Disable();
+        attackAction.performed += _ => characterState?.OnAttack(this);
     }
 
     private void Start()
     {
-        ChangeState(meleeState);
+        // State'e giriş yap
+        characterState?.Enter(this);
     }
 
     private void Update()
     {
-        CurrentState?.Update(this);
+        if (!isActive) return;
+        characterState?.Update(this);
     }
 
     private void FixedUpdate()
     {
+        if (!isActive) return;
         HandleMovement();
+    }
+
+    /// <summary>
+    /// Karakteri aktif/pasif yapar. Pasif karakter input almaz.
+    /// </summary>
+    public void SetActive(bool active)
+    {
+        isActive = active;
+
+        if (active)
+        {
+            moveAction?.Enable();
+            attackAction?.Enable();
+            // State'e tekrar giriş yap (renk vs. güncelleme)
+            characterState?.Enter(this);
+            Debug.Log($"[PlayerController] {characterType} aktif edildi.");
+        }
+        else
+        {
+            moveAction?.Disable();
+            attackAction?.Disable();
+            moveInput = Vector2.zero;
+
+            // Hareket durdur
+            if (rb != null)
+            {
+                rb.linearVelocity = new Vector3(0f, rb.linearVelocity.y, 0f);
+            }
+
+            Debug.Log($"[PlayerController] {characterType} pasif edildi.");
+        }
     }
 
     /// <summary>
@@ -127,10 +142,10 @@ public class PlayerController : MonoBehaviour
     /// </summary>
     private void HandleMovement()
     {
-        if (rb == null || CurrentState == null) return;
+        if (rb == null || characterState == null) return;
 
         Vector3 movement = new Vector3(moveInput.x, 0f, moveInput.y).normalized;
-        Vector3 velocity = movement * CurrentState.MoveSpeed;
+        Vector3 velocity = movement * characterState.MoveSpeed;
         velocity.y = rb.linearVelocity.y; // Yerçekimini koru
         rb.linearVelocity = velocity;
 
@@ -140,27 +155,6 @@ public class PlayerController : MonoBehaviour
             Quaternion targetRotation = Quaternion.LookRotation(movement, Vector3.up);
             transform.rotation = Quaternion.Slerp(transform.rotation, targetRotation, 10f * Time.fixedDeltaTime);
         }
-    }
-
-    public void ChangeState(IPlayerState newState)
-    {
-        if (newState == null)
-        {
-            Debug.LogWarning("[PlayerController] Yeni state null olamaz!");
-            return;
-        }
-
-        if (CurrentState == newState)
-        {
-            Debug.Log($"[PlayerController] Zaten {CurrentState.GetType().Name} state'inde!");
-            return;
-        }
-
-        Debug.Log($"[PlayerController] State değişimi: {CurrentState?.GetType().Name ?? "None"} → {newState.GetType().Name}");
-
-        CurrentState?.Exit(this);
-        CurrentState = newState;
-        CurrentState.Enter(this);
     }
 
     /// <summary>
@@ -203,9 +197,6 @@ public class PlayerController : MonoBehaviour
     {
         moveAction?.Dispose();
         attackAction?.Dispose();
-        switchMeleeAction?.Dispose();
-        switchArcherAction?.Dispose();
-        switchWizardAction?.Dispose();
     }
 
     private void OnDrawGizmosSelected()
